@@ -1,0 +1,8 @@
+Flask 
+pandas 
+openpyxl
+pymysql
+mysql-connector-python
+numpy
+python-docx
+docxcompose
