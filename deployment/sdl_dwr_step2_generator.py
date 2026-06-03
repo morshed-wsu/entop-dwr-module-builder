@@ -292,7 +292,7 @@ def _patch_analysis_tables(docx_path: str, metrics: Dict[str, Any]) -> None:
     # Patch the two visible analysis tables by their header text.
     # Do not rely on fixed table indexes: the Step 2 template has only two visible
     # Word tables, while charts/embedded workbooks are separate OOXML parts.
-    total_val = metrics["total_val"] or 1.0
+    ord_val = metrics["ord_val"] or 1.0
     q_val = metrics["q_val"] or 1.0
     ord_lb_value = metrics["ord_lb_value"]
     q_lb_value = metrics["q_lb_value"]
@@ -329,9 +329,9 @@ def _patch_analysis_tables(docx_path: str, metrics: Dict[str, Any]) -> None:
     order_table = find_table_by_header("Ordering Customers")
     quote_table = find_table_by_header("Quoted Customers")
 
-    # Ordering table follows the master report convention: % of Value uses the active
-    # grand total across Orders + Quotes. Quoted table uses total active quote value.
-    patch_customer_table(order_table, ord_lb_value, "Top Ordering Customers Total", total_val, uppercase_top=True)
+    # Ordering table is about Order customers only, so % of Value uses total active Order value.
+    # Quoted table is about Quote customers only, so % of Value uses total active Quote value.
+    patch_customer_table(order_table, ord_lb_value, "Top Ordering Customers Total", ord_val, uppercase_top=True)
     patch_customer_table(quote_table, q_lb_value, "Top Quoted Customers Total", q_val, uppercase_top=False)
 
     doc.save(docx_path)
@@ -653,6 +653,177 @@ def _patch_embedded_workbooks(docx_path: str, metrics: Dict[str, Any]) -> None:
     os.replace(tmp, docx_path)
 
 
+
+
+def _strip_purple_bar_picts(xml: str) -> str:
+    """
+    Remove the template's old page-body floating purple bars without touching
+    charts, logos, or other artwork.
+
+    Word may store these bars in two different ways after python-docx saves the
+    file:
+      1. Legacy VML: <w:pict><v:rect ... fillcolor="#6f55d7" .../>
+      2. DrawingML/WPS: <w:drawing><wp:anchor ...><wp:docPr name="Rectangle 3"/>...
+
+    The new repeating sidebar is then installed in the header layer only.
+    """
+
+    def is_legacy_vml_bar(block: str) -> bool:
+        b = block.lower()
+        return (
+            "#6f55d7" in b
+            and "width:18pt" in b
+            and ("height:842pt" in b or "height:843.4pt" in b)
+        )
+
+    def is_drawingml_bar(block: str) -> bool:
+        b = block.lower()
+        return (
+            '<wp:docpr' in b
+            and 'name="rectangle 3"' in b
+            and 'cx="228600"' in b
+            and ('cy="10711180"' in b or 'cy="10693400"' in b or 'cy="10692130"' in b)
+            and 'val="accent1"' in b
+            and 'val="50000"' in b
+        )
+
+    def strip_vml(m: re.Match) -> str:
+        block = m.group(0)
+        return "" if is_legacy_vml_bar(block) else block
+
+    def strip_drawing(m: re.Match) -> str:
+        block = m.group(0)
+        return "" if is_drawingml_bar(block) else block
+
+    xml = re.sub(r"<w:pict\b[^>]*>.*?</w:pict>", strip_vml, xml, flags=re.DOTALL)
+    xml = re.sub(r"<w:drawing\b[^>]*>.*?</w:drawing>", strip_drawing, xml, flags=re.DOTALL)
+    return xml
+
+
+def _header_bar_paragraph() -> str:
+    """A page-relative purple bar placed in the header so Word repeats it on every page."""
+    return (
+        '<w:p w14:paraId="8B4F5A21" w14:textId="77777777" w:rsidR="00A5655E" w:rsidRDefault="00A5655E">'
+        '<w:pPr><w:pStyle w:val="Header"/></w:pPr>'
+        '<w:r><w:rPr><w:noProof/></w:rPr>'
+        '<w:pict w14:anchorId="DWRLEFTBAR">'
+        '<v:rect id="_x0000_s4097" '
+        'style="position:absolute;margin-left:0;margin-top:0;width:18pt;height:842pt;z-index:251660288;visibility:visible;'
+        'mso-wrap-style:square;mso-width-percent:0;mso-height-percent:0;'
+        'mso-wrap-distance-left:0;mso-wrap-distance-top:0;mso-wrap-distance-right:0;mso-wrap-distance-bottom:0;'
+        'mso-position-horizontal:absolute;mso-position-horizontal-relative:page;'
+        'mso-position-vertical:absolute;mso-position-vertical-relative:page;'
+        'mso-width-percent:0;mso-height-percent:0;v-text-anchor:top" '
+        'fillcolor="#6f55d7" stroked="f">'
+        '<w10:wrap anchorx="page" anchory="page"/><w10:anchorlock/>'
+        '</v:rect></w:pict></w:r></w:p>'
+    )
+
+
+def _ensure_header_bar(xml: str) -> str:
+    xml = _strip_purple_bar_picts(xml)
+    bar = _header_bar_paragraph()
+    if "</w:hdr>" not in xml:
+        return xml
+    return re.sub(r"(<w:hdr\b[^>]*>)", r"\1" + bar, xml, count=1)
+
+
+def _next_relationship_id(rels_xml: str) -> str:
+    ids = [int(x) for x in re.findall(r'Id="rId(\d+)"', rels_xml)]
+    return f"rId{max(ids + [0]) + 1}"
+
+
+def _install_repeating_left_bar(docx_path: str) -> None:
+    """
+    Replace old per-page floating body bars with one repeating header bar.
+
+    The visual bar definition is intentionally kept the same as the confirmed
+    working version: VML rectangle, #6f55d7, 18pt wide, page-relative.
+    """
+    tmp = docx_path + ".leftbar.tmp"
+    with zipfile.ZipFile(docx_path, "r") as zin:
+        names = set(zin.namelist())
+        doc_xml = zin.read("word/document.xml").decode("utf-8")
+        rels_xml = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+        content_types = zin.read("[Content_Types].xml").decode("utf-8")
+        header1_xml = zin.read("word/header1.xml").decode("utf-8") if "word/header1.xml" in names else None
+
+        doc_xml = _strip_purple_bar_picts(doc_xml)
+
+        if header1_xml is None:
+            raise ValueError("Step 2 template must contain word/header1.xml to install the repeating left bar.")
+        header1_xml = _ensure_header_bar(header1_xml)
+
+        # Avoid a separate first-page header mode. It can change first-page
+        # pagination and push the first pie chart to page 2. The default header
+        # bar now repeats on every page.
+        doc_xml = doc_xml.replace('<w:titlePg/>', '')
+        rels_xml = re.sub(
+            r'<Relationship\s+Id="rId\d+"\s+Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header"\s+Target="header2.xml"\s*/>',
+            '',
+            rels_xml,
+        )
+        content_types = content_types.replace(
+            '<Override PartName="/word/header2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>',
+            '',
+        )
+
+        with zipfile.ZipFile(tmp, "w") as zout:
+            for item in zin.infolist():
+                if item.filename == "word/header2.xml":
+                    continue
+                data = zin.read(item.filename)
+                if item.filename == "word/document.xml":
+                    data = doc_xml.encode("utf-8")
+                elif item.filename == "word/_rels/document.xml.rels":
+                    data = rels_xml.encode("utf-8")
+                elif item.filename == "[Content_Types].xml":
+                    data = content_types.encode("utf-8")
+                elif item.filename == "word/header1.xml":
+                    data = header1_xml.encode("utf-8")
+                zout.writestr(item, data)
+    os.replace(tmp, docx_path)
+
+
+def _fit_first_order_count_chart(docx_path: str) -> None:
+    """
+    Keep the first order-count pie chart on page 1 while restoring its template
+    size. The pie chart itself stays at the original Step 2 template extent
+    (5384800 x 2263140 EMU). Only the first overview chart above it is slightly
+    compacted, which is what allows the pie chart to fit without shrinking.
+    """
+    tmp = docx_path + ".fitpie.tmp"
+    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(tmp, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                xml = data.decode("utf-8")
+
+                def patch_chart(m: re.Match) -> str:
+                    block = m.group(0)
+                    if 'r:id="rId12"' in block:
+                        # Slightly reduce only the first overview chart height.
+                        return re.sub(
+                            r'<wp:extent cx="\d+" cy="\d+"/>',
+                            '<wp:extent cx="4572000" cy="2480000"/>',
+                            block,
+                            count=1,
+                        )
+                    if 'r:id="rId14"' in block:
+                        # Restore original template size for first pie chart.
+                        return re.sub(
+                            r'<wp:extent cx="\d+" cy="\d+"/>',
+                            '<wp:extent cx="5384800" cy="2263140"/>',
+                            block,
+                            count=1,
+                        )
+                    return block
+
+                xml = re.sub(r'<w:drawing\b[^>]*>.*?</w:drawing>', patch_chart, xml, flags=re.DOTALL)
+                data = xml.encode("utf-8")
+            zout.writestr(item, data)
+    os.replace(tmp, docx_path)
+
 def _patch_xml_text_and_props(docx_path: str, metrics: Dict[str, Any]) -> None:
     report_date = metrics["date"]
     date_long = report_date.strftime("%d %B %Y").lstrip("0")
@@ -711,6 +882,8 @@ def generate_dwr_step2(excel_path: str, template_path: str | None = None, output
     _patch_xml_text_and_props(output_path, metrics)
     _patch_charts(output_path, metrics)
     _patch_embedded_workbooks(output_path, metrics)
+    _install_repeating_left_bar(output_path)
+    _fit_first_order_count_chart(output_path)
     return output_path
 
 
