@@ -289,36 +289,50 @@ def _patch_analysis_tables(docx_path: str, metrics: Dict[str, Any]) -> None:
     }
     _replace_everywhere(doc, replacements)
 
-    # Table 1 = Analysis of Top Ordering Customers; Table 2 = Analysis of Top Quoted Customers.
-    if len(doc.tables) >= 3:
-        total_val = metrics["total_val"] or 1.0
-        q_val = metrics["q_val"] or 1.0
-        ord_lb_value = metrics["ord_lb_value"]
-        q_lb_value = metrics["q_lb_value"]
+    # Patch the two visible analysis tables by their header text.
+    # Do not rely on fixed table indexes: the Step 2 template has only two visible
+    # Word tables, while charts/embedded workbooks are separate OOXML parts.
+    total_val = metrics["total_val"] or 1.0
+    q_val = metrics["q_val"] or 1.0
+    ord_lb_value = metrics["ord_lb_value"]
+    q_lb_value = metrics["q_lb_value"]
 
-        order_top_total_v = sum(r[1] for r in ord_lb_value[:3])
-        order_top_total_c = sum(r[2] for r in ord_lb_value[:3])
-        order_other = ord_lb_value[3]
-        order_rows = ord_lb_value[:3] + [("Top Ordering Customers Total", order_top_total_v, order_top_total_c, 0.0), order_other]
-        t = doc.tables[1]
-        for idx, (name, value, count, _time) in enumerate(order_rows, start=1):
-            pct = (value / total_val) if total_val else 0.0
-            _set_cell_text(t.cell(idx, 0), name.upper() if idx <= 3 else name)
-            _set_cell_text(t.cell(idx, 1), _fmt_currency(value))
-            _set_cell_text(t.cell(idx, 2), str(int(count)))
-            _set_cell_text(t.cell(idx, 3), _fmt_pct_decimal(pct))
+    def find_table_by_header(header_text: str):
+        header_text_norm = header_text.strip().lower()
+        for table in doc.tables:
+            if not table.rows:
+                continue
+            first_row_text = " | ".join(cell.text for cell in table.rows[0].cells).lower()
+            if header_text_norm in first_row_text:
+                return table
+        return None
 
-        q_top_total_v = sum(r[1] for r in q_lb_value[:3])
-        q_top_total_c = sum(r[2] for r in q_lb_value[:3])
-        q_other = q_lb_value[3]
-        q_rows = q_lb_value[:3] + [("Top Quoted Customers Total", q_top_total_v, q_top_total_c, 0.0), q_other]
-        t = doc.tables[2]
-        for idx, (name, value, count, _time) in enumerate(q_rows, start=1):
-            pct = (value / q_val) if q_val else 0.0
-            _set_cell_text(t.cell(idx, 0), name)
-            _set_cell_text(t.cell(idx, 1), _fmt_currency(value))
-            _set_cell_text(t.cell(idx, 2), str(int(count)))
-            _set_cell_text(t.cell(idx, 3), _fmt_pct_decimal(pct))
+    def patch_customer_table(table, rows, total_label: str, pct_denominator: float, uppercase_top: bool = False) -> None:
+        if table is None:
+            raise ValueError(f"Could not find Step 2 analysis table with footer label: {total_label}")
+        if len(table.rows) < 6 or len(table.columns) < 4:
+            raise ValueError(f"Step 2 analysis table has unexpected shape: {len(table.rows)} rows x {len(table.columns)} columns")
+
+        top_total_v = sum(r[1] for r in rows[:3])
+        top_total_c = sum(r[2] for r in rows[:3])
+        other = rows[3]
+        output_rows = rows[:3] + [(total_label, top_total_v, top_total_c, 0.0), other]
+
+        for idx, (name, value, count, _time) in enumerate(output_rows, start=1):
+            display_name = name.upper() if uppercase_top and idx <= 3 and name else name
+            pct = (value / pct_denominator) if pct_denominator else 0.0
+            _set_cell_text(table.cell(idx, 0), display_name)
+            _set_cell_text(table.cell(idx, 1), _fmt_currency(value))
+            _set_cell_text(table.cell(idx, 2), str(int(count)))
+            _set_cell_text(table.cell(idx, 3), _fmt_pct_decimal(pct))
+
+    order_table = find_table_by_header("Ordering Customers")
+    quote_table = find_table_by_header("Quoted Customers")
+
+    # Ordering table follows the master report convention: % of Value uses the active
+    # grand total across Orders + Quotes. Quoted table uses total active quote value.
+    patch_customer_table(order_table, ord_lb_value, "Top Ordering Customers Total", total_val, uppercase_top=True)
+    patch_customer_table(quote_table, q_lb_value, "Top Quoted Customers Total", q_val, uppercase_top=False)
 
     doc.save(docx_path)
 
