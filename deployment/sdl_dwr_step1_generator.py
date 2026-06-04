@@ -44,43 +44,17 @@ NS   = {"w": W_NS}
 _SIDEBAR_XML = (
     '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
     '<w:rPr><w:noProof/></w:rPr>'
-    '<w:drawing>'
-    '<wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" '
-    'relativeHeight="251658240" behindDoc="1" locked="1" layoutInCell="1" allowOverlap="0" '
-    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">'
-    '<wp:simplePos x="0" y="0"/>'
-    '<wp:positionH relativeFrom="page"><wp:posOffset>7620</wp:posOffset></wp:positionH>'
-    '<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>'
-    '<wp:extent cx="228600" cy="10692130"/>'
-    '<wp:effectExtent l="0" t="0" r="0" b="0"/>'
-    '<wp:wrapNone/>'
-    '<wp:docPr id="200000001" name="SidebarBar"/>'
-    '<wp:cNvGraphicFramePr/>'
-    '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-    '<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
-    '<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">'
-    '<wps:cNvSpPr/>'
-    '<wps:spPr>'
-    '<a:xfrm><a:off x="0" y="0"/><a:ext cx="228600" cy="10692130"/></a:xfrm>'
-    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
-    '<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="50000"/></a:schemeClr></a:solidFill>'
-    '<a:ln><a:noFill/></a:ln>'
-    '</wps:spPr>'
-    '<wps:style>'
-    '<a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef>'
-    '<a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef>'
-    '<a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>'
-    '<a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef>'
-    '</wps:style>'
-    '<wps:bodyPr rot="0" vert="horz" wrap="square" anchor="ctr" anchorCtr="0">'
-    '<a:noAutofit/>'
-    '</wps:bodyPr>'
-    '</wps:wsp>'
-    '</a:graphicData>'
-    '</a:graphic>'
-    '</wp:anchor>'
-    '</w:drawing>'
-    '</w:r>'
+    '<w:pict w14:anchorId="DWRLEFTBAR">'
+    '<v:rect id="_x0000_s4097" '
+    'style="position:absolute;margin-left:0;margin-top:0;width:18pt;height:842pt;z-index:251660288;visibility:visible;'
+    'mso-wrap-style:square;mso-width-percent:0;mso-height-percent:0;'
+    'mso-wrap-distance-left:0;mso-wrap-distance-top:0;mso-wrap-distance-right:0;mso-wrap-distance-bottom:0;'
+    'mso-position-horizontal:absolute;mso-position-horizontal-relative:page;'
+    'mso-position-vertical:absolute;mso-position-vertical-relative:page;'
+    'mso-width-percent:0;mso-height-percent:0;v-text-anchor:top" '
+    'fillcolor="#6f55d7" stroked="f">'
+    '<w10:wrap anchorx="page" anchory="page"/><w10:anchorlock/>'
+    '</v:rect></w:pict></w:r>'
 )
 
 
@@ -273,17 +247,82 @@ def _drop_blank_para_before(tbl):
 
 # ── Bar-fix functions ─────────────────────────────────────────────────────────
 
-def _strip_rectangle3(doc_xml: str) -> str:
-    """Remove all paragraph-anchored Rectangle 3 floating bar runs from document.xml."""
-    return re.sub(
-        r'<w:r\b[^>]*>(?:<w:rPr>.*?</w:rPr>)?<mc:AlternateContent>'
-        r'(?:(?!<mc:AlternateContent>).)*?name="Rectangle 3".*?</mc:AlternateContent></w:r>',
-        '', doc_xml, flags=re.DOTALL,
+def _is_old_sidebar_run(run) -> bool:
+    """Return True for the old floating purple sidebar run only."""
+    block = etree.tostring(run, encoding="unicode").lower()
+    return (
+        ('name="rectangle 3"' in block and ('<wp:docpr' in block or 'docpr' in block))
+        or (
+            '#6f55d7' in block
+            and 'width:18pt' in block
+            and ('height:842pt' in block or 'height:843.4pt' in block or 'height:842.0pt' in block)
+        )
+        or ('w14:anchorid="dwrleftbar"' in block.lower())
     )
 
+def _remove_old_sidebar_runs(root) -> None:
+    """Remove old body/header floating sidebar objects without touching logos/tables."""
+    doomed_paras = []
+    for run in list(root.xpath("//w:r", namespaces=NS)):
+        if _is_old_sidebar_run(run):
+            parent = run.getparent()
+            parent.remove(run)
+            if parent is not None and etree.QName(parent.tag).localname == "p":
+                txt = ''.join(t.text or '' for t in parent.xpath('.//w:t', namespaces=NS)).strip()
+                has_drawing = bool(parent.xpath('.//*[local-name()="drawing" or local-name()="pict"]'))
+                has_tbl = bool(parent.xpath('.//*[local-name()="tbl"]'))
+                if not txt and not has_drawing and not has_tbl:
+                    doomed_paras.append(parent)
+    for para in doomed_paras:
+        parent = para.getparent()
+        if parent is not None:
+            parent.remove(para)
+
+def _strip_rectangle3(doc_xml: str) -> str:
+    """Remove all old floating sidebar objects safely from document.xml."""
+    try:
+        root = _parse_xml(doc_xml.encode("utf-8"))
+        _remove_old_sidebar_runs(root)
+        return _serialize_xml(root).decode("utf-8")
+    except Exception:
+        # Fallback for damaged XML: remove only self-contained drawing/pict runs.
+        doc_xml = re.sub(
+            r'<w:r\b[^>]*>.*?name="Rectangle 3".*?</w:r>',
+            '', doc_xml, flags=re.DOTALL,
+        )
+        doc_xml = re.sub(
+            r'<w:pict\b[^>]*>.*?fillcolor="#6f55d7".*?</w:pict>',
+            '', doc_xml, flags=re.DOTALL | re.IGNORECASE,
+        )
+        return doc_xml
+
+def _clean_header_sidebar(header_xml: str) -> str:
+    """Remove any pre-existing sidebar bar from a header before injecting one stable bar."""
+    try:
+        root = _parse_xml(header_xml.encode("utf-8"))
+        _remove_old_sidebar_runs(root)
+        return _serialize_xml(root).decode("utf-8")
+    except Exception:
+        header_xml = re.sub(r'<w:r\b[^>]*>.*?w14:anchorId="DWRLEFTBAR".*?</w:r>', '', header_xml, flags=re.DOTALL)
+        return header_xml
+
 def _inject_sidebar(header_xml: str) -> str:
-    """Insert persistent full-page sidebar into first paragraph of header1.xml."""
-    return header_xml.replace('</w:p>', _SIDEBAR_XML + '</w:p>', 1)
+    """Insert persistent full-page sidebar as its own top-level header paragraph."""
+    header_xml = _clean_header_sidebar(header_xml)
+    bar_para = (
+        '<w:p w14:paraId="8B4F5A21" w14:textId="77777777" '
+        'w:rsidR="00A5655E" w:rsidRDefault="00A5655E">'
+        '<w:pPr><w:pStyle w:val="Header"/></w:pPr>'
+        + _SIDEBAR_XML +
+        '</w:p>'
+    )
+    if 'w14:anchorId="DWRLEFTBAR"' in header_xml:
+        return header_xml
+    return re.sub(r'(<w:hdr\b[^>]*>)', r'\1' + bar_para, header_xml, count=1)
+
+def _next_relationship_id(rels_xml: str) -> str:
+    ids = [int(x) for x in re.findall(r'Id="rId(\d+)"', rels_xml)]
+    return f"rId{max(ids + [0]) + 1}"
 
 
 # ── Core patcher ──────────────────────────────────────────────────────────────
@@ -344,41 +383,96 @@ def _patch_all_xml_parts(docx_path: str, data: Dict[str, Any]) -> None:
     }
     tmp = docx_path + ".tmp"
 
-    with zipfile.ZipFile(docx_path, "r") as zin, zipfile.ZipFile(tmp, "w") as zout:
-        for item in zin.infolist():
-            content = zin.read(item.filename)
+    with zipfile.ZipFile(docx_path, "r") as zin:
+        names = set(zin.namelist())
+        original_doc_xml = zin.read("word/document.xml").decode("utf-8")
+        rels_xml_original = zin.read("word/_rels/document.xml.rels").decode("utf-8")
+        content_types_original = zin.read("[Content_Types].xml").decode("utf-8")
+        header1_original = zin.read("word/header1.xml").decode("utf-8") if "word/header1.xml" in names else None
 
-            if item.filename == "word/document.xml":
-                content = _patch_document_xml(content, data)
+        needs_first_header = (
+            '<w:titlePg' in original_doc_xml
+            and '<w:headerReference w:type="first"' not in original_doc_xml
+            and header1_original is not None
+        )
+        new_first_header_rid = _next_relationship_id(rels_xml_original) if needs_first_header else None
+        header2_content = None
+        if needs_first_header:
+            header2_content = _inject_sidebar(_patch_text(header1_original, repls)).encode("utf-8")
 
-            elif item.filename == "word/header1.xml":
-                try:
-                    content = _inject_sidebar(
-                        _patch_text(content.decode("utf-8"), repls)
-                    ).encode("utf-8")
-                except UnicodeDecodeError:
-                    pass
+        with zipfile.ZipFile(tmp, "w") as zout:
+            wrote_header2 = False
+            for item in zin.infolist():
+                content = zin.read(item.filename)
 
-            elif item.filename.endswith(".xml") and (
-                item.filename.startswith("word/") or
-                item.filename.startswith("docProps/") or
-                item.filename.startswith("customXml/")):
-                try:
-                    t = _patch_text(content.decode("utf-8"), repls)
-                    if item.filename == "docProps/core.xml":
-                        t = re.sub(r"<cp:contentStatus>.*?</cp:contentStatus>",
-                                   f"<cp:contentStatus>{html.escape(dwr)}</cp:contentStatus>", t)
-                    if item.filename.startswith("customXml/"):
-                        t = re.sub(r"<PublishDate>.*?</PublishDate>",
-                                   f"<PublishDate>{iso}</PublishDate>", t)
-                    t = re.sub(r'<w:date w:fullDate="[^"]*"',
-                               f'<w:date w:fullDate="{iso}Z"', t)
+                if item.filename == "word/document.xml":
+                    content = _patch_document_xml(content, data)
+                    if needs_first_header and new_first_header_rid:
+                        t = content.decode("utf-8")
+                        t = re.sub(
+                            r'(<w:headerReference\s+w:type="default"\s+r:id="[^"]+"\s*/>)',
+                            r'\1' + f'<w:headerReference w:type="first" r:id="{new_first_header_rid}"/>',
+                            t,
+                            count=1,
+                        )
+                        content = t.encode("utf-8")
+
+                elif item.filename == "word/header1.xml":
+                    try:
+                        content = _inject_sidebar(
+                            _patch_text(content.decode("utf-8"), repls)
+                        ).encode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+
+                elif item.filename == "word/header2.xml":
+                    try:
+                        content = _inject_sidebar(
+                            _patch_text(content.decode("utf-8"), repls)
+                        ).encode("utf-8")
+                        wrote_header2 = True
+                    except UnicodeDecodeError:
+                        pass
+
+                elif item.filename == "word/_rels/document.xml.rels" and needs_first_header and new_first_header_rid:
+                    t = content.decode("utf-8")
+                    if f'Id="{new_first_header_rid}"' not in t:
+                        t = t.replace(
+                            "</Relationships>",
+                            f'<Relationship Id="{new_first_header_rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/></Relationships>'
+                        )
                     content = t.encode("utf-8")
-                except UnicodeDecodeError:
-                    pass
 
-            # Preserve original compress_type — critical for Word compatibility
-            zout.writestr(item, content, compress_type=item.compress_type)
+                elif item.filename == "[Content_Types].xml" and needs_first_header:
+                    t = content.decode("utf-8")
+                    override = '<Override PartName="/word/header2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>'
+                    if 'PartName="/word/header2.xml"' not in t:
+                        t = t.replace("</Types>", override + "</Types>")
+                    content = t.encode("utf-8")
+
+                elif item.filename.endswith(".xml") and (
+                    item.filename.startswith("word/") or
+                    item.filename.startswith("docProps/") or
+                    item.filename.startswith("customXml/")):
+                    try:
+                        t = _patch_text(content.decode("utf-8"), repls)
+                        if item.filename == "docProps/core.xml":
+                            t = re.sub(r"<cp:contentStatus>.*?</cp:contentStatus>",
+                                       f"<cp:contentStatus>{html.escape(dwr)}</cp:contentStatus>", t)
+                        if item.filename.startswith("customXml/"):
+                            t = re.sub(r"<PublishDate>.*?</PublishDate>",
+                                       f"<PublishDate>{iso}</PublishDate>", t)
+                        t = re.sub(r'<w:date w:fullDate="[^"]*"',
+                                   f'<w:date w:fullDate="{iso}Z"', t)
+                        content = t.encode("utf-8")
+                    except UnicodeDecodeError:
+                        pass
+
+                # Preserve original compress_type — critical for Word compatibility
+                zout.writestr(item, content, compress_type=item.compress_type)
+
+            if needs_first_header and header2_content is not None and not wrote_header2:
+                zout.writestr("word/header2.xml", header2_content, compress_type=zipfile.ZIP_DEFLATED)
 
     os.replace(tmp, docx_path)
 
