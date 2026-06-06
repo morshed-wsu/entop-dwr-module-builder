@@ -215,13 +215,68 @@ def _set_row(row, vals):
     for i, v in enumerate(vals):
         if i < len(cells): _set_tc(cells[i], v)
 
+def _cell_text(tc) -> str:
+    return "".join(t.text or "" for t in tc.xpath(".//w:t", namespaces=NS)).strip()
+
+def _set_tc_fill(tc, fill_hex: str) -> None:
+    """Apply a solid Word table-cell fill colour without changing borders/text."""
+    fill = fill_hex.strip().lstrip("#").upper()
+    tcPr = tc.find(f"{{{W_NS}}}tcPr")
+    if tcPr is None:
+        tcPr = etree.Element(f"{{{W_NS}}}tcPr")
+        tc.insert(0, tcPr)
+    for shd in list(tcPr.findall(f"{{{W_NS}}}shd")):
+        tcPr.remove(shd)
+    shd = etree.Element(f"{{{W_NS}}}shd")
+    shd.set(f"{{{W_NS}}}val", "clear")
+    shd.set(f"{{{W_NS}}}color", "auto")
+    shd.set(f"{{{W_NS}}}fill", fill)
+    tcPr.append(shd)
+
+def _set_tc_text_color(tc, color_hex: str) -> None:
+    """Apply a font colour to all text runs in a table cell."""
+    color = color_hex.strip().lstrip("#").upper()
+    runs = tc.xpath(".//w:r", namespaces=NS)
+    if not runs:
+        return
+    for run in runs:
+        rPr = run.find(f"{{{W_NS}}}rPr")
+        if rPr is None:
+            rPr = etree.Element(f"{{{W_NS}}}rPr")
+            run.insert(0, rPr)
+        for old in list(rPr.findall(f"{{{W_NS}}}color")):
+            rPr.remove(old)
+        color_el = etree.Element(f"{{{W_NS}}}color")
+        color_el.set(f"{{{W_NS}}}val", color)
+        rPr.append(color_el)
+
+def _apply_status_coloring(row) -> None:
+    """Colour only the 'Not attempted' status text in incomplete-task rows."""
+    cells = row.xpath("./w:tc", namespaces=NS)
+    if len(cells) < 5:
+        return
+    status_value = _cell_text(cells[-1]).strip().lower()
+    if status_value == "not attempted":
+        _set_tc_text_color(cells[-1], "F26E61")
+
+def _apply_type_shading(row) -> None:
+    """Shade Type cells: O = #EAF7FC and Q = #FFFFE7."""
+    cells = row.xpath("./w:tc", namespaces=NS)
+    if not cells:
+        return
+    type_value = _cell_text(cells[0]).upper()
+    if type_value == "O":
+        _set_tc_fill(cells[0], "EAF7FC")
+    elif type_value == "Q":
+        _set_tc_fill(cells[0], "FFFFE7")
+
 def _rebuild_table(tbl, data_rows, footer_vals, fkw=None, fn=None):
     rows = tbl.xpath("./w:tr", namespaces=NS)
     if len(rows) < 3: return
     dtmpl = deepcopy(rows[1]); ftmpl = deepcopy(rows[-1])
     for r in rows[1:]: tbl.remove(r)
     for vals in data_rows:
-        nr = deepcopy(dtmpl); _set_row(nr, vals); tbl.append(nr)
+        nr = deepcopy(dtmpl); _set_row(nr, vals); _apply_type_shading(nr); _apply_status_coloring(nr); tbl.append(nr)
     fr = deepcopy(ftmpl)
     if fkw and fn is not None:
         cells = fr.xpath("./w:tc", namespaces=NS)
